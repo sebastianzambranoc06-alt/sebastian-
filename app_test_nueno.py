@@ -1,12 +1,9 @@
-# app.py
+# app_test_nuevo.py
 import streamlit as st
-import torch
-import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import os
-import torchvision.transforms as transforms
 
 # Configuración
 st.set_page_config(
@@ -15,171 +12,65 @@ st.set_page_config(
     layout="wide"
 )
 
-# ================= ARQUITECTURA DEL MODELO =================
+# ================= FUNCIONES DE PREPROCESAMIENTO =================
 
-class GenderCNN(nn.Module):
-    def __init__(self):
-        super(GenderCNN, self).__init__()
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(3, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(16 * 56 * 56, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        x = self.conv_layers(x)
-        x = self.classifier(x)
-        return x
-
-# ================= FUNCIONES DE EXPLICABILIDAD CON PYTORCH =================
-
-def compute_saliency_map_pytorch(model, image_tensor, class_idx=0):
-    """Calcula el Saliency Map para una imagen con PyTorch"""
+def preparar_imagen(imagen):
+    """Prepara la imagen para el modelo"""
     try:
-        image_tensor = image_tensor.clone().detach().requires_grad_(True)
+        if imagen.mode != 'RGB':
+            imagen = imagen.convert('RGB')
         
-        # Forward pass
-        output = model(image_tensor)
-        loss = output[0, 0] if class_idx == 0 else 1 - output[0, 0]
+        # Redimensionar a 224x224 (tamaño esperado por la CNN)
+        imagen = imagen.resize((224, 224))
+        array_imagen = np.array(imagen)
         
-        # Backward pass para obtener gradientes
-        model.zero_grad()
-        loss.backward()
+        # Normalizar a [0, 1]
+        array_imagen = array_imagen.astype('float32') / 255.0
         
-        # Obtener gradientes de la imagen de entrada
-        gradients = image_tensor.grad.data
+        # Reordenar canales si es necesario y agregar dimensión batch
+        array_imagen = np.transpose(array_imagen, (2, 0, 1))  # (H,W,C) -> (C,H,W)
+        lote_imagen = np.expand_dims(array_imagen, axis=0)
         
-        if gradients is not None:
-            # Tomar el valor máximo absoluto de los gradientes a través de los canales
-            saliency, _ = torch.max(torch.abs(gradients), dim=1)
-            saliency = saliency[0]  # Primera imagen del batch
-            
-            # Normalizar entre 0 y 1
-            if saliency.max() - saliency.min() > 0:
-                saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min())
-            
-            return saliency.cpu().numpy()
-        else:
-            return np.zeros((224, 224))
-            
-    except Exception as e:
-        st.error(f"Error en Saliency Map: {e}")
-        return np.zeros((224, 224))
-
-def compute_grad_cam_pytorch(model, image_tensor, class_idx=0, layer_name=None):
-    """Calcula Grad-CAM para una imagen con PyTorch"""
-    try:
-        # Hook para capturar activaciones
-        activations = None
-        gradients = None
-        
-        def forward_hook(module, input, output):
-            nonlocal activations
-            activations = output
-            
-        def backward_hook(module, grad_input, grad_output):
-            nonlocal gradients
-            gradients = grad_output[0]
-        
-        # Encontrar la última capa convolucional si no se especifica
-        if layer_name is None:
-            for name, module in model.named_modules():
-                if isinstance(module, nn.Conv2d):
-                    layer_name = name
-            # Usar la primera capa convolucional como fallback
-            target_layer = model.conv_layers[0]
-        else:
-            # Buscar la capa por nombre
-            for name, module in model.named_modules():
-                if name == layer_name:
-                    target_layer = module
-                    break
-        
-        # Registrar hooks
-        forward_handle = target_layer.register_forward_hook(forward_hook)
-        backward_handle = target_layer.register_backward_hook(backward_hook)
-        
-        # Forward pass
-        output = model(image_tensor)
-        if class_idx == 0:
-            loss = output[0, 0]
-        else:
-            loss = 1 - output[0, 0]
-        
-        # Backward pass
-        model.zero_grad()
-        loss.backward()
-        
-        # Calcular Grad-CAM
-        if activations is not None and gradients is not None:
-            # Global Average Pooling de los gradientes
-            weights = torch.mean(gradients, dim=(2, 3))[0]  # (num_channels,)
-            
-            # Multiplicar activaciones por pesos
-            cam = torch.zeros(activations.shape[2:])  # (H, W)
-            for i, w in enumerate(weights):
-                cam += w * activations[0, i]
-            
-            # Aplicar ReLU y normalizar
-            cam = torch.relu(cam)
-            if cam.max() > 0:
-                cam = cam / cam.max()
-            
-            # Redimensionar al tamaño original
-            cam = torch.nn.functional.interpolate(
-                cam.unsqueeze(0).unsqueeze(0), 
-                size=(224, 224), 
-                mode='bilinear',
-                align_corners=False
-            )
-            
-            heatmap = cam.squeeze().cpu().numpy()
-        else:
-            heatmap = crear_heatmap_simple()
-        
-        # Remover hooks
-        forward_handle.remove()
-        backward_handle.remove()
-        
-        return heatmap
+        return lote_imagen, np.transpose(array_imagen, (1, 2, 0))  # Para visualización
         
     except Exception as e:
-        st.error(f"Error en Grad-CAM: {e}")
-        return crear_heatmap_simple()
+        st.error(f"Error procesando imagen: {e}")
+        return None, None
 
-def crear_heatmap_simple():
-    """Crea un heatmap simple centrado en la cara"""
+# ================= FUNCIONES DE EXPLICABILIDAD SIMULADAS =================
+
+def crear_heatmap_simple(centro_x=112, centro_y=112, tamano=50):
+    """Crea un heatmap simple centrado en características faciales"""
     h, w = 224, 224
     y, x = np.ogrid[0:h, 0:w]
-    center_x, center_y = w//2, h//2
     
-    dist_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-    main_region = np.exp(-dist_center / 70)
+    # Región central principal (rostro)
+    dist_centro = np.sqrt((x - centro_x)**2 + (y - centro_y)**2)
+    region_principal = np.exp(-dist_centro / (tamano * 1.5))
     
-    left_eye = np.exp(-((x - center_x + 40)**2 + (y - center_y - 30)**2) / 400)
-    right_eye = np.exp(-((x - center_x - 40)**2 + (y - center_y - 30)**2) / 400)
-    mouth = np.exp(-((x - center_x)**2 + (y - center_y + 40)**2) / 600)
+    # Regiones de ojos
+    ojo_izq = np.exp(-((x - centro_x + 30)**2 + (y - centro_y - 20)**2) / (tamano * 8))
+    ojo_der = np.exp(-((x - centro_x - 30)**2 + (y - centro_y - 20)**2) / (tamano * 8))
     
-    grad_cam = main_region * 0.6 + left_eye * 0.8 + right_eye * 0.8 + mouth * 0.7
-    grad_cam = suavizar_heatmap(grad_cam, kernel_size=15)
+    # Región de boca
+    boca = np.exp(-((x - centro_x)**2 + (y - centro_y + 30)**2) / (tamano * 12))
     
-    if grad_cam.max() > 0:
-        grad_cam = grad_cam / grad_cam.max()
+    # Combinar todo
+    heatmap = (region_principal * 0.5 + 
+               ojo_izq * 0.8 + ojo_der * 0.8 + 
+               boca * 0.7)
     
-    return grad_cam
+    # Suavizar
+    heatmap = suavizar_heatmap(heatmap, kernel_size=15)
+    
+    # Normalizar
+    if heatmap.max() > 0:
+        heatmap = heatmap / heatmap.max()
+    
+    return heatmap
 
 def suavizar_heatmap(matrix, kernel_size=5):
-    """Suaviza un heatmap sin usar cv2"""
+    """Suaviza un heatmap"""
     h, w = matrix.shape
     padded = np.pad(matrix, kernel_size//2, mode='edge')
     result = np.zeros_like(matrix)
@@ -191,76 +82,75 @@ def suavizar_heatmap(matrix, kernel_size=5):
     
     return result
 
-# ================= FUNCIONES PRINCIPALES =================
+def compute_saliency_map_simulado(imagen_procesada, prob_mujer):
+    """Simula un saliency map basado en la probabilidad"""
+    # Crear heatmap que se adapta a la predicción
+    if prob_mujer > 0.5:
+        # Para mujer: enfatizar características suaves
+        centro_x, centro_y = 112, 100
+        tamano = 45
+    else:
+        # Para hombre: características más angulares
+        centro_x, centro_y = 112, 105  
+        tamano = 40
+    
+    saliency = crear_heatmap_simple(centro_x, centro_y, tamano)
+    
+    # Ajustar intensidad según confianza
+    confianza = max(prob_mujer, 1 - prob_mujer)
+    saliency = saliency * (0.3 + confianza * 0.7)
+    
+    return saliency
+
+def compute_grad_cam_simulado(imagen_procesada, prob_mujer):
+    """Simula Grad-CAM basado en la predicción"""
+    if prob_mujer > 0.5:
+        # Para mujer: áreas más suaves y redondeadas
+        centro_x, centro_y = 112, 100
+        tamano = 55
+    else:
+        # Para hombre: áreas más definidas
+        centro_x, centro_y = 112, 108
+        tamano = 42
+    
+    grad_cam = crear_heatmap_simple(centro_x, centro_y, tamano)
+    
+    # Hacer el heatmap más específico
+    confianza = max(prob_mujer, 1 - prob_mujer)
+    grad_cam = grad_cam * (0.4 + confianza * 0.6)
+    
+    return grad_cam
+
+# ================= MODELO SIMULADO (para demo) =================
 
 @st.cache_resource
-def cargar_modelo():
-    """Carga el modelo PyTorch - versión para HF Spaces"""
-    try:
-        # Intentar cargar desde diferentes rutas posibles
-        rutas_posibles = [
-            'models/modelo.pth',
-            'modelo.pth',
-            '/tmp/modelo.pth'
-        ]
-        
-        modelo_cargado = None
-        modelo_path = None
-        
-        for ruta in rutas_posibles:
-            if os.path.exists(ruta):
-                modelo_path = ruta
-                break
-        
-        if modelo_path:
-            # Cargar checkpoint
-            checkpoint = torch.load(modelo_path, map_location='cpu', weights_only=False)
+def cargar_modelo_simulado():
+    """Simula la carga de un modelo CNN"""
+    st.info("🔧 Usando sistema de demostración - Cargando modelo simulado")
+    
+    # En una implementación real, aquí cargarías un modelo ONNX
+    # Por ahora simulamos predicciones basadas en características de la imagen
+    
+    class ModeloSimulado:
+        def predict(self, imagen_batch):
+            # Simular predicción basada en características de color
+            imagen = imagen_batch[0]  # Primera imagen del batch
             
-            # Recrear modelo
-            modelo_cargado = GenderCNN()
+            # Extraer características simples para simular CNN
+            prom_rojo = np.mean(imagen[0])  # Canal rojo
+            prom_verde = np.mean(imagen[1])  # Canal verde
+            prom_azul = np.mean(imagen[2])  # Canal azul
             
-            # Cargar pesos
-            if 'model_state_dict' in checkpoint:
-                modelo_cargado.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                # Si es solo el state_dict
-                modelo_cargado.load_state_dict(checkpoint)
+            # Simular lógica simple (esto sería reemplazado por el modelo real)
+            # En general, tonos de piel tienden a tener ciertos rangos
+            prob_mujer = 0.5 + (prom_rojo - prom_verde) * 2  # Simulación simple
             
-            modelo_cargado.eval()
-            st.success(f"✅ Modelo PyTorch cargado desde: {modelo_path}")
-        else:
-            st.warning("⚠️ No se encontró el modelo. Usando modelo de demostración.")
-            modelo_cargado = GenderCNN()
-            modelo_cargado.eval()
+            # Asegurar que esté en [0, 1]
+            prob_mujer = max(0.1, min(0.9, prob_mujer))
             
-        return modelo_cargado
-        
-    except Exception as e:
-        st.error(f"❌ Error cargando modelo: {e}")
-        modelo_demo = GenderCNN()
-        modelo_demo.eval()
-        return modelo_demo
-
-def preparar_imagen(imagen):
-    """Prepara la imagen para el modelo PyTorch"""
-    try:
-        if imagen.mode != 'RGB':
-            imagen = imagen.convert('RGB')
-        
-        # Transformaciones compatibles con el entrenamiento
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        imagen_tensor = transform(imagen).unsqueeze(0)  # Añadir dimensión batch
-        array_imagen = np.array(imagen.resize((224, 224))) / 255.0  # Para visualización
-        
-        return imagen_tensor, array_imagen
-    except Exception as e:
-        st.error(f"Error procesando imagen: {e}")
-        return None, None
+            return np.array([[prob_mujer]])
+    
+    return ModeloSimulado()
 
 # ================= INTERFAZ PRINCIPAL =================
 
@@ -269,9 +159,10 @@ def main():
     st.markdown("**Análisis con Saliency Maps y Grad-CAM**")
     
     # Cargar modelo
-    modelo = cargar_modelo()
+    modelo = cargar_modelo_simulado()
     
     st.success("✅ Sistema listo para análisis con explicabilidad!")
+    st.warning("⚠️ **Modo demostración**: Usando sistema simulado. Para producción, cargar modelo ONNX.")
     
     # Subir imagen
     archivo = st.file_uploader("Sube una imagen facial", type=['jpg', 'jpeg', 'png'])
@@ -287,32 +178,29 @@ def main():
         
         # Procesar y predecir
         with st.spinner("🔍 Analizando imagen y generando explicaciones..."):
-            imagen_tensor, imagen_procesada = preparar_imagen(imagen)
+            lote_imagen, imagen_procesada = preparar_imagen(imagen)
             
-            if imagen_tensor is not None:
-                # Predicción con PyTorch
+            if lote_imagen is not None:
                 try:
-                    with torch.no_grad():
-                        prediccion = modelo(imagen_tensor)
-                        prob_mujer = float(prediccion[0, 0])
-                        prob_mujer = max(0.0, min(1.0, prob_mujer))
-                        prob_hombre = 1.0 - prob_mujer
+                    # Predicción simulada
+                    prediccion = modelo.predict(lote_imagen)
+                    prob_mujer = float(prediccion[0, 0])
+                    prob_mujer = max(0.0, min(1.0, prob_mujer))
+                    prob_hombre = 1.0 - prob_mujer
                     
                     # Determinar clase
                     if prob_mujer > 0.5:
                         resultado = "MUJER 👩"
                         confianza = prob_mujer
                         color = "#e84393"
-                        class_idx = 1  # Mujer
                     else:
                         resultado = "HOMBRE 👨"
                         confianza = prob_hombre
                         color = "#3498db"
-                        class_idx = 0  # Hombre
                     
-                    # Generar mapas de explicabilidad
-                    saliency_map = compute_saliency_map_pytorch(modelo, imagen_tensor, class_idx)
-                    grad_cam_map = compute_grad_cam_pytorch(modelo, imagen_tensor, class_idx)
+                    # Generar mapas de explicabilidad simulados
+                    saliency_map = compute_saliency_map_simulado(imagen_procesada, prob_mujer)
+                    grad_cam_map = compute_grad_cam_simulado(imagen_procesada, prob_mujer)
                     
                 except Exception as e:
                     st.error(f"Error en predicción: {e}")
@@ -409,11 +297,16 @@ def main():
         # Información adicional
         with st.expander("📋 Información Técnica"):
             st.markdown("""
-            **Métodos de Explicabilidad:**
-            - **Saliency Map**: Gradientes de la entrada respecto a la salida
-            - **Grad-CAM**: Global Average Pooling de gradientes en capas convolucionales
-            - **Framework**: PyTorch (compatible con Streamlit Cloud)
-            - **Arquitectura**: CNN con 2 capas convolucionales
+            **Características del Sistema:**
+            - **Arquitectura**: CNN simulada con explicabilidad
+            - **Compatibilidad**: 100% con Streamlit Cloud
+            - **Explicabilidad**: Mapas de calor simulados basados en características faciales
+            - **Precisión**: Sistema de demostración - para producción usar modelo ONNX entrenado
+            
+            **Próximos pasos para producción:**
+            1. Entrenar CNN con PyTorch/TensorFlow
+            2. Exportar modelo a formato ONNX
+            3. Cargar modelo ONNX en esta aplicación
             """)
 
 if __name__ == "__main__":
